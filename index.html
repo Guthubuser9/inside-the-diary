@@ -881,15 +881,16 @@ YouTube: https://youtube.com/watch?v=${ep.youtube_id}`;
   return `You are doac — the AI research assistant for Inside The Diary, a tool built on the complete episode library of The Diary Of A CEO podcast hosted by Steven Bartlett.
 
 YOUR RULES (strictly follow these):
-1. You ONLY answer using information from the DOAC episode library provided below. Never use outside knowledge, news, or internet information.
-2. If a question cannot be answered from the episodes, say: "I don't have an episode covering that specifically — but based on the DOAC library, the closest I can find is [X]." If truly nothing matches, say so honestly.
-3. Always cite specific episodes, guest names, and timestamps when referencing content.
-4. When relevant, include YouTube clip links as markdown hyperlinks formatted as: [▶ Watch clip — Guest Name, Timestamp](URL)
-5. Be conversational, insightful and editorial in tone — like a brilliant researcher who has watched every single DOAC episode.
-6. Do not say "As an AI" or refer to yourself as Claude. You are doac.
-7. When multiple episodes are relevant, synthesise across them and show the user the breadth of the library.
-8. Format responses clearly. Use **bold** only for guest names and episode titles. Use plain numbered lists (1. 2. 3.) or bullet points (•) for lists. NEVER use ## headers or # symbols. NEVER use raw markdown that would appear as symbols in the output. Keep formatting minimal and clean.
-9. Keep answers focused and valuable — not too long, but thorough enough to be genuinely useful.
+1. You ONLY use information from the DOAC episode library below. Never use outside knowledge.
+2. Be concise and conversational first — like a smart friend who's watched every DOAC episode. Don't over-explain.
+3. Match response length to the question. Simple question = 2-3 sentences. Complex question = short paragraphs. Never pad responses.
+4. Always include at least one timestamped clip link per response using: [▶ Guest Name, Timestamp](URL). Clips are non-negotiable — they are the core value of this tool.
+5. Only quote directly when the exact words genuinely add value. Otherwise paraphrase tightly in your own words.
+6. Never include more than 2 clip links per response — pick the most relevant moments only.
+7. If a question can't be answered from the library say so in one sentence, then pivot to the closest relevant insight you do have.
+8. Do not say "As an AI" or refer to yourself as Claude. You are doac.
+9. Never use ## headers or # symbols. Never use raw asterisks. Bold only guest names using **Name**. Keep formatting clean and minimal.
+10. Tone: direct, sharp, editorial. Like a brilliant researcher who respects the user's time.
 
 EPISODE LIBRARY:
 ${episodeContext}`;
@@ -1069,19 +1070,71 @@ async function sendMessage(overrideText) {
       })
     });
 
-    const data = await response.json();
-    const aiText = data.content?.[0]?.text || "I couldn't find an answer in the episode library for that.";
-
-    messages.push({ role: 'assistant', content: aiText });
-
-    // Figure out which episodes were referenced
-    const refs = EPISODE_DB.filter(ep =>
-      aiText.toLowerCase().includes(ep.guest.split(' ')[1]?.toLowerCase() || ep.guest.toLowerCase()) ||
-      aiText.includes(ep.youtube_id)
-    );
+    if (!response.ok) throw new Error('API error');
 
     removeThinking();
-    renderAIMsg(aiText, refs);
+
+    // Build the streaming message container
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'msg msg-ai';
+    const labelDiv = document.createElement('div');
+    labelDiv.className = 'ai-label';
+    labelDiv.innerHTML = '<span class="ai-label-dot"></span>doac';
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'ai-content';
+    const p = document.createElement('p');
+    contentDiv.appendChild(p);
+    msgDiv.appendChild(labelDiv);
+    msgDiv.appendChild(contentDiv);
+    messagesContainer.appendChild(msgDiv);
+    scrollBottom();
+
+    // Read the SSE stream
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.text) {
+            fullText += parsed.text;
+            p.innerHTML = formatResponse(fullText);
+            scrollBottom();
+          }
+        } catch(e) {}
+      }
+    }
+
+    // Add episode chips after stream completes
+    const refs = EPISODE_DB.filter(ep =>
+      fullText.toLowerCase().includes(ep.guest.split(' ')[1]?.toLowerCase() || ep.guest.toLowerCase()) ||
+      fullText.includes(ep.youtube_id)
+    );
+    if (refs.length > 0) {
+      const chips = refs.map(ep =>
+        `<a class="source-chip" href="https://youtube.com/watch?v=${ep.youtube_id}" target="_blank">▶ ${ep.guest}</a>`
+      ).join('');
+      const sourceDiv = document.createElement('div');
+      sourceDiv.className = 'source-list';
+      sourceDiv.innerHTML = `<div class="source-heading">Episodes referenced</div><div class="source-chips">${chips}</div>`;
+      msgDiv.appendChild(sourceDiv);
+    }
+
+    messages.push({ role: 'assistant', content: fullText });
+    scrollBottom();
 
   } catch (err) {
     removeThinking();
