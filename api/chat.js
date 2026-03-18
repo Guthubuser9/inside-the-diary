@@ -1,72 +1,43 @@
-export const config = {
-  runtime: 'edge',
-};
-
-export default async function handler(req) {
+export default async function handler(req, res) {
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405 });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: 'API key not configured' }), { status: 500 });
+    return res.status(500).json({ error: 'API key not configured' });
   }
 
-  const body = await req.json();
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey.trim(),
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: req.body.model || 'claude-sonnet-4-20250514',
+        max_tokens: req.body.max_tokens || 1000,
+        system: req.body.system,
+        messages: req.body.messages,
+      }),
+    });
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey.trim(),
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: body.model || 'claude-sonnet-4-20250514',
-      max_tokens: body.max_tokens || 1000,
-      system: body.system,
-      messages: body.messages,
-      stream: true,
-    }),
-  });
+    const data = await response.json();
 
-  if (!response.ok) {
-    const error = await response.json();
-    return new Response(JSON.stringify({ error: error.error?.message || 'API error' }), { status: response.status });
-  }
-
-  // Transform the Anthropic SSE stream into clean text chunks for the frontend
-  const transformer = new TransformStream({
-    transform(chunk, controller) {
-      const text = new TextDecoder().decode(chunk);
-      const lines = text.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') {
-            controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-            continue;
-          }
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-              controller.enqueue(
-                new TextEncoder().encode(`data: ${JSON.stringify({ text: parsed.delta.text })}\n\n`)
-              );
-            }
-          } catch (e) {
-            // skip malformed chunks
-          }
-        }
-      }
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: data.error?.message || 'Anthropic API error',
+      });
     }
-  });
 
-  return new Response(response.body.pipeThrough(transformer), {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    },
-  });
+    return res.status(200).json(data);
+
+  } catch (error) {
+    return res.status(500).json({ 
+      error: 'Failed to reach Anthropic API',
+      message: error.message 
+    });
+  }
 }
