@@ -13,6 +13,31 @@ export default async function handler(req, res) {
   const { messages } = req.body;
   const userQuestion = messages[messages.length - 1].content;
 
+  // Verified guest name lookup by video ID
+  const GUEST_MAP = {
+    "9uSXOr-AdAU": "Chase Hughes",
+    "fpETS6q1Hww": "Daniel Priestley",
+    "xcXfcXJvMXg": "Robert Pape",
+    "nrwNSSyKuD4": "Wesley Huff",
+    "e9dljIL4rBk": "Andrew Bustamante, Annie Jacobsen & Benjamin Radd",
+    "t38LbMVoPCs": "Larry Johnson",
+    "Xm_PHZXGe-w": "Dr. Robert Lustig",
+    "s52O1JH2tnU": "Dara Khosrowshahi",
+    "ajgwabD4_HE": "Alex Honnold",
+    "EScgrk7oEwU": "Tristan Harris",
+    "Uvy5mcLiWW0": "James Sexton",
+    "pXlMKzcZlwM": "Dr. Matthew Walker",
+    "0t_DD5568RA": "Dr. Richard Isaacson",
+    "sR7S2Q3c04g": "Dotan Negrin",
+    "99xyy1nUpug": "JL Collins",
+    "w3dTmyZq4Qk": "Dr. Sabine Hazan",
+    "nJeU72Rgjh4": "Alex Krainer",
+    "yUNoJ32eLBc": "Andrew Bustamante",
+    "I_w81rptxkc": "Tony Robbins",
+    "FoeQUNASmTU": "JL Collins",
+    "C7LL7VwP8Nc": "Dr. Benjamin Bikman"
+  };
+
   try {
     // Step 1: Search Pinecone for relevant chunks
     const searchResponse = await fetch(
@@ -24,40 +49,51 @@ export default async function handler(req, res) {
           'Api-Key': pineconeKey,
         },
         body: JSON.stringify({
-          query: { inputs: { text: userQuestion }, top_k: 15 },
+          query: { inputs: { text: userQuestion }, top_k: 30 },
           fields: ['text', 'title', 'timestamp', 'clip_url', 'video_id'],
         }),
       }
     );
 
     const searchData = await searchResponse.json();
-    const hits = searchData.result?.hits || [];
+    const allHits = searchData.result?.hits || [];
 
-    // Step 2: Build context from relevant chunks
+    // Step 2: Deduplicate — max 3 chunks per episode for diversity
+    const episodeCounts = {};
+    const hits = [];
+    for (const hit of allHits) {
+      const vid = hit.fields.video_id;
+      episodeCounts[vid] = (episodeCounts[vid] || 0) + 1;
+      if (episodeCounts[vid] <= 3) hits.push(hit);
+      if (hits.length >= 15) break;
+    }
+
+    // Step 3: Build context with verified guest names
     const context = hits.map(hit => {
       const f = hit.fields;
-      return `EPISODE: "${f.title}"\nTIMESTAMP: ${f.timestamp}\nCLIP: ${f.clip_url}\nCONTENT: ${f.text}`;
+      const guest = GUEST_MAP[f.video_id] || f.title.split(':')[0].trim();
+      return `EPISODE: "${f.title}"\nGUEST: ${guest}\nTIMESTAMP: ${f.timestamp}\nCLIP: ${f.clip_url}\nCONTENT: ${f.text}`;
     }).join('\n\n---\n\n');
 
-    // Step 3: Build system prompt with retrieved context
+    // Step 4: System prompt
     const systemPrompt = `You are doac — the AI research assistant for Inside The Diary, built on The Diary Of A CEO podcast library hosted by Steven Bartlett.
 
 RULES:
 1. ONLY use information from the episode context provided below. Never use outside knowledge.
-2. Be concise and conversational — like a brilliant, well-read friend who has watched every DOAC episode. Think and respond the way Claude would, but drawing exclusively from the DOAC library.
-3. Match response length to the question. Simple question = 2-3 sentences. A question asking for multiple insights, tips or examples = full structured answer with a point for each.
-4. Use your judgment on how many clips to include. Match the number of clips to the complexity of the question — a simple question may need 1 clip, a question asking for multiple tips or examples should include a clip for each point where one is available (e.g. if asked for 10 wealth tips, aim to reference up to 10 clips). Never include clips for the sake of it — every clip must directly support the point being made. Format every clip as: [▶ Guest Name, Timestamp](CLIP_URL)
+2. Write in flowing, natural prose — never use headers, bullet points or numbered lists unless the question specifically asks for a list. Answers should read like a thoughtful, well-informed friend is talking to you, not a formatted document.
+3. Match response length to the question. Simple question = 2-3 sentences. Complex question = a few short paragraphs that flow naturally into each other.
+4. Weave clip links naturally into your prose at the moment they are relevant — not all at the end. Format every clip as: [▶ Guest Name, Timestamp](CLIP_URL) using the GUEST field provided. Include as many clips as the question warrants — one per key point made.
 5. Only quote directly when the exact words genuinely add value. Otherwise paraphrase tightly.
-6. If the context doesn't contain a relevant answer say so honestly in one sentence, then pivot to the closest relevant insight you do have.
-7. Do not say "As an AI" or refer to yourself as Claude. You are doac.
-8. Never use ## headers or # symbols. Never use raw asterisks. Bold only guest names using **Name**. Keep formatting clean and minimal.
-9. Tone: direct, sharp, warm and editorial. Like a researcher who genuinely loves this content and respects the user's time.
-10. When synthesising across multiple episodes or guests, show the connections and contrasts — that cross-episode insight is what makes doac uniquely valuable.
+6. Draw from multiple guests and episodes where possible — the cross-episode synthesis is what makes doac uniquely valuable.
+7. If the context doesn't contain a relevant answer say so honestly in one sentence, then pivot to the closest relevant insight you do have.
+8. Do not say "As an AI" or refer to yourself as Claude. You are doac.
+9. Never use ## headers, # symbols, or raw asterisks. Bold only guest names using **Name** when first introducing them.
+10. Tone: direct, warm, editorial. Like a researcher who genuinely loves this content and respects the user's time.
 
 RELEVANT EPISODE CONTEXT:
 ${context}`;
 
-    // Step 4: Call Claude with the retrieved context
+    // Step 5: Call Claude
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
